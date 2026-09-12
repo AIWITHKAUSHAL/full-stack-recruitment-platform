@@ -49,6 +49,7 @@ OIDC — no long-lived AWS keys anywhere.
 24. [Troubleshooting](#24-troubleshooting)
 25. [Screenshots](#25-screenshots)
 26. [Easy AWS deployment from a Mac (step by step)](#26-easy-aws-deployment-from-a-mac-step-by-step)
+27. [Running on your local Mac (step by step)](#27-running-on-your-local-mac-step-by-step)
 
 ---
 
@@ -512,7 +513,7 @@ until `/health` answers.
 | API | <http://localhost:8000/api/v1/jobs> |
 | Swagger | <http://localhost:8000/docs> |
 | Health | <http://localhost:8000/health> |
-| PostgreSQL | `localhost:5432` (`jobboard` / `jobboard_local_password`) |
+| PostgreSQL | `localhost:5432` (`jobboard` / `jobboard_local_password`) — not a web page; use `docker compose exec postgres psql -U jobboard -d jobboard` or a DB client |
 
 Admin sign-in comes from `.env` — by default `admin@minijobboard.dev` /
 `ChangeMe123!`. Change both before exposing this anywhere.
@@ -1416,3 +1417,98 @@ See [section 22](#22-destroying-everything) for what the destroy covers.
 | Before the demo | `make infra-init && make infra-apply` → `make deploy` → seed (Step 5) → `make verify` |
 | After a code change | `make deploy` |
 | After the demo | `make destroy` → `make destroy-check` |
+
+---
+
+## 27. Running on your local Mac (step by step)
+
+Nothing in this section touches AWS or costs money. `S3_RESUME_BUCKET` is
+empty, so uploaded resumes land in `backend/.local-storage/` instead of S3.
+
+### Option A — Docker (recommended, one command)
+
+Needs only Docker Desktop, running.
+
+```bash
+cd mini-job-board-application-tracker
+./scripts/bootstrap.sh
+```
+
+The script:
+
+1. Copies `.env.example` to `.env` if `.env` does not exist yet.
+2. Builds and starts PostgreSQL, the FastAPI backend and the Vite frontend
+   (`docker compose up --build -d`).
+3. Waits for `/health`. The backend container runs the Alembic migrations and
+   seeds the demo data itself on start-up.
+
+Then open:
+
+| What | Where |
+|---|---|
+| Frontend | <http://localhost:5173> |
+| Admin sign-in | <http://localhost:5173> → Admin — `admin@minijobboard.dev` / `ChangeMe123!` |
+| Swagger | <http://localhost:8000/docs> |
+| API | <http://localhost:8000/api/v1/jobs> |
+| Health | <http://localhost:8000/health> |
+| PostgreSQL | `localhost:5432` (`jobboard` / `jobboard_local_password`) — not a web page; use `docker compose exec postgres psql -U jobboard -d jobboard` or a DB client |
+
+Everyday commands:
+
+```bash
+make local                # docker compose up (foreground)
+make logs                 # tail the container logs
+make down                 # stop, keep the database
+docker compose down -v    # stop and wipe the database
+```
+
+### Option B — Native (Python and Node on the Mac, PostgreSQL in Docker)
+
+Needs Python 3.11+, Node 20+ and Docker Desktop (for PostgreSQL only).
+
+```bash
+# 1. Start only the database
+docker compose up -d postgres
+
+# 2. Install dependencies (creates backend/.venv and runs npm ci)
+make install
+
+# 3. Create the schema and load the demo data
+make migrate
+TARGET=local make seed
+
+# 4. Backend — terminal 1
+cd backend && .venv/bin/uvicorn app.main:app --reload     # :8000
+
+# 5. Frontend — terminal 2
+cd frontend && npm run dev                                 # :5173
+```
+
+> **Which `.env` is read?** The backend loads `.env` from the directory it is
+> started in — `backend/` here — so the repository-root `.env` (whose
+> `DATABASE_URL` points at the Docker hostname `postgres`) is **not** used.
+> With no `backend/.env`, the defaults in `app/core/config.py` apply, and they
+> already point at `localhost:5432` with the same credentials as the Docker
+> PostgreSQL. To override a setting, create `backend/.env`, e.g.
+> `DATABASE_URL=postgresql+psycopg://jobboard:jobboard_local_password@localhost:5432/jobboard`.
+
+The Vite dev server proxies `/api` and `/health` to `http://localhost:8000`,
+so the browser stays on one origin and no CORS setup is needed.
+
+### Running the tests
+
+```bash
+make install   # once
+make test      # backend pytest (SQLite, no services needed) + frontend Vitest
+make lint      # ruff + eslint + tsc
+```
+
+### Quick reference
+
+| When | Command |
+|---|---|
+| First run | `./scripts/bootstrap.sh` |
+| Start again later | `make local` |
+| Stop | `make down` |
+| Fresh database | `docker compose down -v` → `./scripts/bootstrap.sh` |
+| Before committing | `make test` |
