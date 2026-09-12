@@ -11,9 +11,11 @@
 # content (the page is HTTPS, a bare ALB is HTTP), and the frontend can be built
 # with the relative base URL "/api/v1".
 #
-# WHY NOT ROUTE 53: this deployment uses the generated *.cloudfront.net domain.
-# A hosted zone costs $0.50/month and a domain costs money, neither of which a
-# classroom demo needs (RESTRICTIONS.md #19).
+# WHY NOT ROUTE 53: by default this deployment uses the generated
+# *.cloudfront.net domain. A hosted zone costs $0.50/month, which a classroom
+# demo does not need (RESTRICTIONS.md #19). An optional custom domain is
+# supported without Route 53: the certificate comes from ACM (acm.tf) and the
+# DNS records stay at the registrar.
 # =============================================================================
 
 # Origin Access Control is what lets CloudFront read a *private* bucket. The
@@ -45,12 +47,45 @@ data "aws_cloudfront_response_headers_policy" "security_headers" {
   name = "Managed-SecurityHeadersPolicy"
 }
 
+# ---------------------------------------------------------- SPA fallback ---
+# React Router owns /jobs/12 and /track; those keys do not exist in S3. This
+# function rewrites any extension-less path to /index.html *before* the request
+# reaches S3, so a refresh on a deep link works.
+#
+# WHY NOT custom_error_response: error pages are distribution-wide. Mapping
+# 403/404 → index.html with a 200 also swallowed every API 404 ("unknown job",
+# "wrong tracking email") and returned the React page with a 200 instead. This
+# function is attached to the S3 behaviour only, so API errors pass through
+# untouched, and a genuinely missing asset (/assets/missing.js) still fails.
+#
+# COST: CloudFront Functions are $0.10 per million invocations after the first
+# 2 million/month free — effectively $0 for this demo.
+resource "aws_cloudfront_function" "spa_rewrite" {
+  name    = "${local.name_prefix}-spa-rewrite"
+  comment = "Rewrite client-side routes to /index.html"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = <<-JS
+    function handler(event) {
+      var request = event.request;
+      var lastSegment = request.uri.split('/').pop();
+      if (lastSegment.indexOf('.') === -1) {
+        request.uri = '/index.html';
+      }
+      return request;
+    }
+  JS
+}
+
 resource "aws_cloudfront_distribution" "frontend" {
   enabled             = true
   is_ipv6_enabled     = true
   comment             = "${var.project_display_name} (${var.environment})"
   default_root_object = "index.html"
   price_class         = var.cloudfront_price_class
+
+  # Empty unless custom_domain is set and attached (acm.tf).
+  aliases = local.cloudfront_aliases
 
   # ------------------------------------------------------------- origins ---
   origin {
@@ -85,6 +120,11 @@ resource "aws_cloudfront_distribution" "frontend" {
 
     cache_policy_id            = data.aws_cloudfront_cache_policy.optimized.id
     response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_rewrite.arn
+    }
   }
 
   # ------------------------------------------------------ API: never cache ---
@@ -136,23 +176,8 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
   }
 
-  # ---------------------------------------------------------- SPA fallback ---
-  # React Router owns /jobs/12 and /track. Those keys do not exist in S3, so S3
-  # answers 403/404. Rewriting both to index.html with a 200 is what makes a
-  # refresh on a deep link work.
-  custom_error_response {
-    error_code            = 403
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
-  }
-
-  custom_error_response {
-    error_code            = 404
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 10
-  }
+  # No custom_error_response: the SPA fallback is aws_cloudfront_function.spa_rewrite
+  # above, scoped to the S3 behaviour so API status codes are never rewritten.
 
   restrictions {
     geo_restriction {
@@ -161,10 +186,14 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   viewer_certificate {
-    # The default *.cloudfront.net certificate. A custom domain would need ACM
-    # in us-east-1 plus Route 53.
-    cloudfront_default_certificate = true
-    minimum_protocol_version       = "TLSv1"
+    # Without a custom domain: the default *.cloudfront.net certificate, which
+    # only accepts minimum_protocol_version "TLSv1". With one: the ACM
+    # certificate, served via SNI (free; a dedicated-IP certificate costs
+    # $600/month) and TLS 1.2+.
+    cloudfront_default_certificate = !local.custom_domain_attached
+    acm_certificate_arn            = local.custom_domain_attached ? aws_acm_certificate_validation.custom_domain[0].certificate_arn : null
+    ssl_support_method             = local.custom_domain_attached ? "sni-only" : null
+    minimum_protocol_version       = local.custom_domain_attached ? "TLSv1.2_2021" : "TLSv1"
   }
 
   # No WAF: it carries a monthly charge per web ACL plus per-request fees, and

@@ -53,7 +53,7 @@ These are not preferences. They are hard rules for this repository.
 
 | Restriction | How this repo enforces it |
 |---|---|
-| No committed secrets | `.gitignore` excludes `.env`, `*.tfvars`, `*.tfstate`, `.pem`; only `*.example` files are tracked |
+| No committed secrets | `.gitignore` excludes environment files, Terraform state/variables/plans, cloud credentials, private keys and package-manager auth files; `make secrets-check` scans every file eligible for commit, and CI runs the same check |
 | No plaintext admin password | `app/core/security.py` bcrypt-hashes on the way in; `admins.password_hash` is the only stored form |
 | RDS private | `terraform/rds.tf`: `publicly_accessible = false`, DB subnet group uses private subnets only |
 | No open DB SG | `terraform/security_groups.tf`: RDS ingress `security_groups = [ecs_sg.id]`, never a CIDR |

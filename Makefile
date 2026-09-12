@@ -10,7 +10,7 @@ BACKEND_DIR  := backend
 FRONTEND_DIR := frontend
 COMPOSE      := docker compose
 
-.PHONY: help install local local-build down logs test test-backend test-frontend lint \
+.PHONY: help install local local-build down logs test test-backend test-frontend lint secrets-check \
         migrate makemigration seed infra-init infra-validate infra-plan infra-apply \
         outputs deploy verify destroy destroy-check clean
 
@@ -48,6 +48,9 @@ test-frontend: ## Run frontend Vitest suite
 lint: ## Lint backend (ruff) and frontend (eslint + tsc)
 	cd $(BACKEND_DIR) && . .venv/bin/activate && ruff check app tests
 	cd $(FRONTEND_DIR) && npm run lint && npx tsc --noEmit
+
+secrets-check: ## Check files eligible for commit for credentials and sensitive filenames
+	./scripts/check-secrets.sh
 
 # ---------------------------------------------------------------- database --
 migrate: ## Apply Alembic migrations against DATABASE_URL

@@ -115,3 +115,44 @@ def test_me_returns_the_profile_without_the_hash(client, auth_headers, admin):
     body = client.get("/api/v1/admin/auth/me", headers=auth_headers).json()
     assert body["email"] == admin.email
     assert "password_hash" not in body
+
+
+def _login_status(client, email: str, password: str) -> int:
+    return client.post(
+        "/api/v1/admin/auth/login", json={"email": email, "password": password}
+    ).status_code
+
+
+def test_reset_password_replaces_the_old_password(client, db, admin, admin_password):
+    from app.services.auth import AuthService
+
+    AuthService(db).reset_password(admin.email.upper(), "A-New-Strong-Password-42")
+
+    assert _login_status(client, admin.email, admin_password) == 401
+    assert _login_status(client, admin.email, "A-New-Strong-Password-42") == 200
+    assert admin.password_hash.startswith("$2")  # still bcrypt, never plaintext
+
+
+def test_reset_password_for_an_unknown_admin_fails(db, admin):
+    from app.core.exceptions import AdminNotFoundError
+    from app.services.auth import AuthService
+
+    with pytest.raises(AdminNotFoundError):
+        AuthService(db).reset_password("nobody@example.com", "A-New-Strong-Password-42")
+
+
+def test_seed_only_resets_an_existing_password_when_asked(
+    client, db, admin, admin_password, monkeypatch
+):
+    from app.core.config import settings
+    from scripts.seed import seed_admin
+
+    monkeypatch.setattr(settings, "admin_password", "Rotated-Password-42")
+
+    # A plain re-seed must never overwrite a password somebody already uses.
+    assert seed_admin(db) == "already present"
+    assert _login_status(client, admin.email, admin_password) == 200
+
+    assert seed_admin(db, reset_password=True) == "password reset"
+    assert _login_status(client, admin.email, admin_password) == 401
+    assert _login_status(client, admin.email, "Rotated-Password-42") == 200

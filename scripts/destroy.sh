@@ -21,7 +21,8 @@
 #   S3 objects              uploaded by deploy.sh and by candidates
 #   one-off ECS tasks       migrations / seed started with `aws ecs run-task`;
 #                           a running one stops the cluster from being deleted
-#   task definition revs    registered by every deploy (free, but clutter)
+#   task definition revs    registered by every deploy (free, but clutter);
+#                           deregistered, then permanently deleted
 #
 # Safe to re-run: every step skips whatever is already gone.
 # =============================================================================
@@ -49,13 +50,13 @@ ${YELLOW}${BOLD}This will permanently destroy the following AWS resources:${RESE
 
   VPC, subnets, route tables, internet gateway, security groups
   Application Load Balancer and target group
-  ECS cluster, service, running tasks and task definitions   (${CLUSTER:-n/a})
+  ECS cluster, service, running tasks and every task definition revision   (${CLUSTER:-n/a})
   ECR repository and every image in it
   RDS PostgreSQL instance ${BOLD}and all its data${RESET} (no final snapshot, no backups kept)
   S3 bucket ${FRONTEND_BUCKET:-n/a}  (frontend)
   S3 bucket ${RESUME_BUCKET:-n/a}  (resumes, including candidate uploads)
   CloudFront distribution, CloudWatch log groups, dashboard and alarm
-  IAM roles, policies and the GitHub OIDC provider
+  IAM roles and policies (plus the GitHub OIDC provider, only if this stack created it)
   SSM parameters holding the database URL and the JWT signing key
 
 ${YELLOW}Nothing outside this Terraform state is touched.${RESET}
@@ -150,6 +151,29 @@ deregister_task_definitions() {
   success "Task definitions deregistered"
 }
 
+# Deregistering only marks a revision INACTIVE; AWS keeps listing it. Deleting
+# it removes it for good (ECS finishes the delete once no task references it).
+# Includes revisions deregistered by earlier runs, and never another family.
+delete_task_definitions() {
+  [ -n "${TASK_FAMILY}" ] || return 0
+
+  local arns
+  arns="$(aws ecs list-task-definitions --family-prefix "${TASK_FAMILY}" --status INACTIVE \
+    --region "${AWS_REGION}" --output json 2>/dev/null \
+    | jq -r --arg family "${TASK_FAMILY}" \
+        '.taskDefinitionArns[]? | select(test(":task-definition/" + $family + ":[0-9]+$"))' || true)"
+  [ -n "${arns}" ] || return 0
+
+  log "Permanently deleting task definition revisions of ${TASK_FAMILY}"
+  # The API accepts at most 10 revisions per call.
+  if printf '%s\n' ${arns} | xargs -n 10 aws ecs delete-task-definitions \
+    --region "${AWS_REGION}" --task-definitions >/dev/null; then
+    success "Task definitions deleted"
+  else
+    warn "Some task definition revisions could not be deleted; check-leftovers.sh will list them."
+  fi
+}
+
 stop_standalone_tasks
 empty_bucket "${FRONTEND_BUCKET}"
 empty_bucket "${RESUME_BUCKET}"
@@ -167,6 +191,7 @@ if ! terraform -chdir="${TF_DIR}" destroy -auto-approve; then
 fi
 
 deregister_task_definitions
+delete_task_definitions
 
 # ---------------------------------------------------------------- verify ----
 log "Verifying that the state is empty"

@@ -219,7 +219,7 @@ make destroy-check                                       # read-only: anything f
 
 `scripts/destroy.sh` empties **only** the two bucket names emitted by
 `terraform output`, stops tasks only in the project cluster, and deregisters
-only the project's task definition family. It must never run a broad
+and deletes only the project's task definition family. It must never run a broad
 `aws s3 rb` across the account. `scripts/check-leftovers.sh` only lists
 resources and never deletes anything.
 

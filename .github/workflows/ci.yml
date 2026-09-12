@@ -168,25 +168,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for committed AWS keys, tfstate and .env files
-        # A cheap, dependency-free guard for the rules in RESTRICTIONS.md #1-#5.
-        run: |
-          set -e
-          fail=0
-
-          if git grep -nE 'AKIA[0-9A-Z]{16}' -- . ':(exclude).github/workflows/ci.yml'; then
-            echo "::error::An AWS access key id appears to be committed."
-            fail=1
-          fi
-
-          if git ls-files | grep -E '(^|/)\.env$|\.tfstate$|\.tfvars$'; then
-            echo "::error::A .env, .tfstate or .tfvars file is tracked by git."
-            fail=1
-          fi
-
-          if git grep -nE 'aws_secret_access_key\s*=\s*["'"'"'][A-Za-z0-9/+=]{40}' -- .; then
-            echo "::error::An AWS secret access key appears to be committed."
-            fail=1
-          fi
-
-          exit $fail
+      - name: Check for committed credentials and sensitive files
+        run: ./scripts/check-secrets.sh

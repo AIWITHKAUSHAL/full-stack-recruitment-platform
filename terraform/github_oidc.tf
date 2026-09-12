@@ -11,16 +11,33 @@
 #   GitHub workflow ──► OIDC token ──► sts:AssumeRoleWithWebIdentity ──► temp creds
 # =============================================================================
 
-# One OIDC provider per account. If the account already has one (another project
-# set it up), import it instead of creating a duplicate:
-#   terraform import aws_iam_openid_connect_provider.github \
-#     arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
+# AWS allows exactly one provider per URL per account. If another project already
+# created it, set create_github_oidc_provider = false and this stack only *looks
+# it up*. We deliberately do not `terraform import` it: an imported provider
+# lands in this state, and `terraform destroy` would then delete it out from
+# under the other project.
 resource "aws_iam_openid_connect_provider" "github" {
+  count = var.create_github_oidc_provider ? 1 : 0
+
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
   tags = { Name = "${local.name_prefix}-github-oidc" }
+}
+
+data "aws_iam_openid_connect_provider" "github" {
+  count = var.create_github_oidc_provider ? 0 : 1
+
+  url = "https://token.actions.githubusercontent.com"
+}
+
+locals {
+  github_oidc_provider_arn = (
+    var.create_github_oidc_provider
+    ? aws_iam_openid_connect_provider.github[0].arn
+    : data.aws_iam_openid_connect_provider.github[0].arn
+  )
 }
 
 data "aws_iam_policy_document" "github_assume_role" {
@@ -30,7 +47,7 @@ data "aws_iam_policy_document" "github_assume_role" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
 
     condition {

@@ -97,6 +97,15 @@ class ForbiddenError(AppError):
     message = "You do not have permission to perform this action."
 
 
+# Raised only by operator tooling (the seed script's password reset). The login
+# endpoint never uses it: it answers "unknown account" with UnauthorizedError so
+# it cannot be used to discover which emails are registered.
+class AdminNotFoundError(AppError):
+    status_code = 404
+    code = "ADMIN_NOT_FOUND"
+    message = "No administrator is registered with that email address."
+
+
 # ----------------------------------------------------------------- generic ---
 class ValidationError(AppError):
     status_code = 422
