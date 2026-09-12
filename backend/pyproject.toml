@@ -1,0 +1,32 @@
+[project]
+name = "mini-job-board-application-tracker-backend"
+version = "1.0.0"
+description = "FastAPI backend for the Mini Job Board Application Tracker"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["alembic/versions", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "C4", "SIM"]
+ignore = [
+    "B008",   # FastAPI's Depends()/Query() in defaults is the documented idiom
+    "E501",   # long lines are handled by the formatter
+    "UP042",  # `str, Enum` is kept over StrEnum: it is the idiom every FastAPI
+              # and SQLAlchemy tutorial uses, and this repository is teaching material
+    "UP046",  # Generic[T] is kept over PEP 695 `class Paginated[T]` for the same reason
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Keyword-style dict() calls read better than braces in test fixture tables.
+"tests/*" = ["C408"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --disable-warnings"
+filterwarnings = ["ignore::DeprecationWarning"]

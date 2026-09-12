@@ -1,0 +1,26 @@
+# Version ranges (not exact pins) so that this one file installs cleanly on the
+# Python 3.12 container image *and* on newer interpreters a student may have
+# locally. For a real production service you would pin exact versions here and
+# generate a lock file.
+
+# ---- web framework -----------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+python-multipart>=0.0.20          # required for multipart/form-data resume upload
+
+# ---- validation / settings ---------------------------------------------------
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+email-validator>=2.2,<3.0         # backs pydantic EmailStr
+
+# ---- database ----------------------------------------------------------------
+SQLAlchemy>=2.0.36,<2.1
+alembic>=1.14,<2.0
+psycopg[binary]>=3.2.3,<4.0       # PostgreSQL driver (psycopg 3, not psycopg2)
+
+# ---- auth --------------------------------------------------------------------
+PyJWT>=2.10,<3.0                  # admin access tokens
+bcrypt>=4.2,<5.0                  # password hashing (used directly, no passlib)
+
+# ---- aws ---------------------------------------------------------------------
+boto3>=1.35,<2.0                  # S3 resume upload + presigned download URLs

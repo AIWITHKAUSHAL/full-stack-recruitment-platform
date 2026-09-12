@@ -1,0 +1,98 @@
+# =============================================================================
+# Mini Job Board Application Tracker — local development stack
+#
+#   docker compose up
+#
+#   frontend : http://localhost:5173
+#   backend  : http://localhost:8000
+#   swagger  : http://localhost:8000/docs
+#   postgres : localhost:5432 (jobboard/jobboard)
+#
+# This file exists so a student can run the *entire* three-tier application
+# (React -> FastAPI -> PostgreSQL) with one command and no local Python or
+# Node installation. On AWS the equivalents are ECS Fargate (backend),
+# S3+CloudFront (frontend) and RDS (postgres).
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mjb-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobboard_local_password}
+      POSTGRES_DB: ${POSTGRES_DB:-jobboard}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobboard} -d ${POSTGRES_DB:-jobboard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      # Repository root, so that seed/jobs.json can be copied into the image.
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: mjb-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jobboard}:${POSTGRES_PASSWORD:-jobboard_local_password}@postgres:5432/${POSTGRES_DB:-jobboard}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-local-development-only-secret-change-me}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@minijobboard.dev}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ChangeMe123!}
+      # Empty bucket name => resumes are written to the local fallback directory
+      # instead of S3, so the stack runs with no AWS credentials at all.
+      S3_RESUME_BUCKET: ${S3_RESUME_BUCKET:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Run migrations then seed demo data on startup (local convenience only;
+      # on AWS the migration is a separate, explicit deployment step).
+      RUN_MIGRATIONS_ON_START: "true"
+      SEED_ON_START: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./seed:/seed:ro
+    command: ["/app/scripts/start-dev.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: mjb-frontend
+    depends_on:
+      - backend
+    environment:
+      # The Vite dev server proxies /api to the backend (vite.config.ts), so a
+      # relative base URL works in Docker and on the host alike.
+      VITE_API_BASE_URL: /api/v1
+      # Inside the compose network the backend is reachable by service name,
+      # not on the frontend container's own localhost.
+      VITE_PROXY_TARGET: http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+
+volumes:
+  postgres_data:
+    name: mjb_postgres_data

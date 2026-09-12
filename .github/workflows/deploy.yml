@@ -1,0 +1,284 @@
+# =============================================================================
+# Deployment to AWS
+#
+# Triggered by a push to main, or manually. Authenticates with GitHub OIDC —
+# there is no AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY anywhere in this
+# repository or in GitHub secrets (RESTRICTIONS.md #1, #2).
+#
+#   checkout -> OIDC -> tests -> build -> ECR -> migrate -> ECS -> health
+#            -> frontend build -> S3 -> CloudFront invalidation
+#
+# REQUIRED ONE-TIME SETUP (see README "GitHub OIDC setup"):
+#   gh variable set AWS_DEPLOY_ROLE_ARN --body "$(terraform output -raw github_actions_role_arn)"
+#   gh variable set AWS_REGION          --body "us-east-1"
+#   gh variable set ECR_REPOSITORY      --body "$(terraform output -raw ecr_repository_url)"
+#   gh variable set ECS_CLUSTER         --body "$(terraform output -raw ecs_cluster_name)"
+#   gh variable set ECS_SERVICE         --body "$(terraform output -raw ecs_service_name)"
+#   gh variable set ECS_TASK_FAMILY     --body "$(terraform output -raw ecs_task_definition_family)"
+#   gh variable set FRONTEND_BUCKET     --body "$(terraform output -raw frontend_bucket_name)"
+#   gh variable set CLOUDFRONT_DISTRIBUTION_ID --body "$(terraform output -raw cloudfront_distribution_id)"
+#   gh variable set APPLICATION_URL     --body "$(terraform output -raw application_url)"
+#   gh variable set ECS_SUBNET_IDS      --body "subnet-aaa,subnet-bbb"
+#   gh variable set ECS_SECURITY_GROUP_ID --body "$(terraform output -raw ecs_task_security_group_id)"
+#
+# These are repository *variables*, not secrets: none of them is confidential,
+# and having them visible makes the workflow far easier to debug.
+# =============================================================================
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip the test suites (emergency rollback only)'
+        type: boolean
+        default: false
+
+# Never let two deployments race each other onto the same ECS service.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required to request the OIDC token
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  # ---------------------------------------------------------------- tests ---
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          pip install -r requirements-dev.txt
+          ruff check app tests scripts
+          pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run test:run
+
+  # -------------------------------------------------------------- backend ---
+  backend:
+    name: Build, migrate and release the backend
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ always() && (needs.test.result == 'success' || inputs.skip_tests) }}
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-deploy-${{ github.run_id }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        id: build
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          # Immutable tag: every running task is traceable to one commit.
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE="${ECR_REPOSITORY}:${IMAGE_TAG}"
+          # --platform matters: Fargate here runs X86_64 (terraform/ecs.tf).
+          docker build --platform linux/amd64 -f backend/Dockerfile \
+            -t "$IMAGE" -t "${ECR_REPOSITORY}:latest" .
+          docker push "$IMAGE"
+          docker push "${ECR_REPOSITORY}:latest"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Register a new task definition revision
+        id: taskdef
+        env:
+          TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+            | jq --arg IMAGE "$IMAGE" '
+                .taskDefinition
+                | .containerDefinitions[0].image = $IMAGE
+                | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy)
+              ' > taskdef.json
+          ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+                 | jq -r '.taskDefinition.taskDefinitionArn')
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "Registered $ARN"
+
+      - name: Run database migrations
+        # A one-off task with the NEW image, completed before the service rolls.
+        # If this fails the workflow stops here and the running version keeps
+        # serving traffic.
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          TASK_DEF: ${{ steps.taskdef.outputs.arn }}
+          SUBNETS: ${{ vars.ECS_SUBNET_IDS }}
+          SG: ${{ vars.ECS_SECURITY_GROUP_ID }}
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=ENABLED}" \
+            --overrides '{"containerOverrides":[{"name":"backend","command":["alembic","upgrade","head"]}]}' \
+            | jq -r '.tasks[0].taskArn')
+
+          echo "Migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            | jq -r '.tasks[0].containers[0].exitCode')
+          REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            | jq -r '.tasks[0].stoppedReason // "n/a"')
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration failed with exit code $EXIT_CODE ($REASON)"
+            aws logs tail "/ecs/$(echo "$CLUSTER" | sed 's/-cluster$//')" --since 10m || true
+            exit 1
+          fi
+          echo "Migrations applied"
+
+      - name: Deploy to ECS
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+          TASK_DEF: ${{ steps.taskdef.outputs.arn }}
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$TASK_DEF" >/dev/null
+          echo "Waiting for the service to stabilise…"
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "Service is stable"
+
+      - name: Health check
+        env:
+          APPLICATION_URL: ${{ vars.APPLICATION_URL }}
+        run: |
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$APPLICATION_URL/health" || true)
+            if [ "$CODE" = "200" ]; then
+              echo "Health check passed"
+              curl -s "$APPLICATION_URL/health/ready" || true
+              exit 0
+            fi
+            echo "attempt $i: got $CODE"
+            sleep 10
+          done
+          echo "::error::The deployed API never returned 200 from /health"
+          exit 1
+
+  # ------------------------------------------------------------- frontend ---
+  frontend:
+    name: Build and publish the frontend
+    runs-on: ubuntu-latest
+    needs: [backend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-frontend-${{ github.run_id }}
+
+      - name: Build
+        working-directory: frontend
+        env:
+          # Same origin as the page: CloudFront routes /api/* to the ALB, so the
+          # browser makes no cross-origin request in production.
+          VITE_API_BASE_URL: ${{ vars.APPLICATION_URL }}/api/v1
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload to S3
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET }}
+        run: |
+          # Hashed asset filenames are immutable and cached for a year…
+          aws s3 sync frontend/dist "s3://$BUCKET" --delete \
+            --exclude "index.html" \
+            --cache-control "public, max-age=31536000, immutable"
+          # …but index.html must never be cached, or browsers keep loading the
+          # previous release's asset references.
+          aws s3 cp frontend/dist/index.html "s3://$BUCKET/index.html" \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "text/html"
+
+      - name: Invalidate CloudFront
+        env:
+          DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          ID=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" \
+                --paths '/*' | jq -r '.Invalidation.Id')
+          echo "Invalidation $ID created"
+
+  # -------------------------------------------------------------- summary ---
+  summary:
+    name: Deployment summary
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    if: always()
+
+    steps:
+      - name: Print the result
+        run: |
+          {
+            echo "## Mini Job Board Application Tracker"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Image | \`${{ needs.backend.outputs.image }}\` |"
+            echo "| Backend | ${{ needs.backend.result }} |"
+            echo "| Frontend | ${{ needs.frontend.result }} |"
+            echo ""
+            echo "**Application:** ${{ vars.APPLICATION_URL }}"
+            echo ""
+            echo "**API:** ${{ vars.APPLICATION_URL }}/api/v1/jobs"
+            echo ""
+            echo "**Swagger:** ${{ vars.APPLICATION_URL }}/docs"
+          } >> "$GITHUB_STEP_SUMMARY"

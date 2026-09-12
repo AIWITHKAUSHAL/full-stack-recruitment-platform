@@ -1,0 +1,37 @@
+# =============================================================================
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored — it is
+# yours, and it must never be committed.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+# =============================================================================
+
+aws_region  = "us-east-1"
+environment = "dev"
+
+# REQUIRED for GitHub Actions deployment: the OIDC trust policy only accepts
+# workflow runs from this exact repository.
+github_repository = "your-github-username/mini-job-board-application-tracker"
+
+# ---------------------------------------------------------------------- cost --
+# The defaults below are already the cheapest sensible values. They are repeated
+# here so the cost levers are visible in one place.
+
+ecs_task_cpu      = 256 # 0.25 vCPU
+ecs_task_memory   = 512 # MiB
+ecs_desired_count = 1
+ecs_min_capacity  = 1
+ecs_max_capacity  = 4
+
+db_instance_class        = "db.t4g.micro"
+db_allocated_storage     = 20
+db_backup_retention_days = 1
+db_multi_az              = false # true roughly doubles the database bill
+
+log_retention_days     = 7
+cloudfront_price_class = "PriceClass_100" # US + EU edges only
+
+# Extra CORS origins beyond the CloudFront URL, which Terraform adds itself.
+allowed_frontend_origins = ["http://localhost:5173"]
+
+# Days before a demo resume is deleted by the S3 lifecycle rule. 0 = never.
+resume_retention_days = 180

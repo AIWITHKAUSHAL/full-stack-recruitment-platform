@@ -1,0 +1,33 @@
+# Build context for the BACKEND image, which is built from the repository root
+# (docker build -f backend/Dockerfile .) so that seed/jobs.json ships inside it.
+# The frontend image uses ./frontend as its context and frontend/.dockerignore.
+.git
+.github
+frontend
+terraform
+docs
+load-test
+skills
+rules
+*.md
+
+backend/.venv
+backend/venv
+backend/tests
+backend/.local-storage
+backend/.pytest_cache
+backend/.ruff_cache
+backend/htmlcov
+**/__pycache__
+**/*.py[cod]
+**/*.db
+**/*.sqlite3
+
+.env
+.env.*
+!.env.example
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.DS_Store
