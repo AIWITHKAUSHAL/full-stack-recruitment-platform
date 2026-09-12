@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.exceptions import UnauthorizedError
+from app.core.exceptions import AdminNotFoundError, UnauthorizedError
 from app.core.logging import get_logger
 from app.core.security import (
     create_access_token,
@@ -92,3 +92,20 @@ class AuthService:
         self.db.commit()
         self.db.refresh(admin)
         return admin, True
+
+    def reset_password(self, email: str, new_password: str) -> Admin:
+        """Operator recovery for a forgotten or mistyped bootstrap password.
+
+        Exists because the database is private and there is no self-service
+        "forgot password" flow: without this, a lost admin password could only
+        be fixed with hand-written SQL. Deliberately *not* reachable over HTTP —
+        only the seed script calls it, run by someone who already has AWS access.
+        """
+        admin = self.repo.get_by_email(email)
+        if admin is None:
+            raise AdminNotFoundError(f"No administrator is registered as {email}.")
+        admin.password_hash = hash_password(new_password)
+        self.db.commit()
+        # The admin id only — never the email/password pair.
+        logger.info("admin password reset", extra={"extra_fields": {"admin_id": admin.id}})
+        return admin

@@ -16,6 +16,34 @@ output "cloudfront_url" {
   value       = local.cloudfront_url
 }
 
+# application_url deliberately stays the *.cloudfront.net address even with a
+# custom domain: it works whether or not the registrar's DNS has caught up, so
+# deploy.sh and verify.sh never depend on DNS propagation.
+output "custom_domain_url" {
+  description = "Your own domain, once custom_domain is attached. null until then."
+  value       = local.custom_domain_attached ? "https://${var.custom_domain}" : null
+}
+
+output "custom_domain_validation_records" {
+  description = "Step 1 of the custom domain: add each as a CNAME at your registrar. 'host' is what Namecheap's Host field expects (the domain part removed)."
+  value = local.custom_domain_enabled ? [
+    for o in aws_acm_certificate.custom_domain[0].domain_validation_options : {
+      domain = o.domain_name
+      type   = o.resource_record_type
+      host   = trimsuffix(o.resource_record_name, ".${var.custom_domain}.")
+      value  = o.resource_record_value
+    }
+  ] : []
+}
+
+output "custom_domain_dns_records" {
+  description = "Step 2 of the custom domain: the records that point your domain at CloudFront."
+  value = local.custom_domain_enabled ? [
+    { host = "@", type = "ALIAS (Namecheap) / ANAME", value = aws_cloudfront_distribution.frontend.domain_name },
+    { host = "www", type = "CNAME", value = aws_cloudfront_distribution.frontend.domain_name },
+  ] : []
+}
+
 output "cloudfront_distribution_id" {
   description = "Distribution id, used for cache invalidation after a frontend deploy."
   value       = aws_cloudfront_distribution.frontend.id

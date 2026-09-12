@@ -12,15 +12,18 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 from app.core.config import settings
 from app.db.metadata import target_metadata  # imports every model
 
 config = context.config
 
-# The URL comes from the environment, never from alembic.ini.
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# The URL comes from the environment, never from alembic.ini — and it is passed
+# straight to SQLAlchemy rather than through config.set_main_option(). Alembic's
+# config is a ConfigParser, which treats '%' as interpolation syntax: a
+# URL-encoded password such as 'p%24ss' makes it crash, and its error message
+# echoes the full URL, password included, into the logs.
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -40,11 +43,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_engine(settings.database_url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(
             connection=connection,

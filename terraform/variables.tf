@@ -41,6 +41,29 @@ variable "github_repository" {
   default     = "your-github-username/mini-job-board-application-tracker"
 }
 
+variable "custom_domain" {
+  description = "Optional apex domain (e.g. example.com) served by CloudFront alongside www.<domain>. Empty = use only the *.cloudfront.net URL. DNS stays at your registrar; no Route 53."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.custom_domain == "" || can(regex("^([a-z0-9-]+\\.)+[a-z]{2,}$", var.custom_domain))
+    error_message = "custom_domain must be a bare lowercase domain like example.com — no https://, no www., no trailing dot."
+  }
+}
+
+variable "attach_custom_domain" {
+  description = "Second step of the custom-domain setup: set true only after the ACM validation CNAMEs are at your registrar. Attaches the certificate and domain to CloudFront."
+  type        = bool
+  default     = false
+}
+
+variable "create_github_oidc_provider" {
+  description = "Create the account-wide GitHub OIDC provider. Set false when the account already has one (another project made it); this stack then references it and never destroys it."
+  type        = bool
+  default     = true
+}
+
 # ----------------------------------------------------------------- network ---
 variable "vpc_cidr" {
   description = "CIDR block for the VPC."

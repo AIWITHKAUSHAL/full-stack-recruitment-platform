@@ -596,6 +596,7 @@ Or `make infra-init`, `make infra-plan`, `make infra-apply`.
 | `security_groups.tf` | ALB → ECS → RDS chain, each referencing the previous group |
 | `s3.tf` | Private frontend and resume buckets, encryption, public-access block, OAC policy, resume lifecycle rule |
 | `cloudfront.tf` | One distribution, S3 + ALB origins, SPA fallback, cache behaviours |
+| `acm.tf` | Optional custom domain: free ACM certificate, DNS kept at the registrar |
 | `alb.tf` | Load balancer, target group (`/health`), listener |
 | `ecr.tf` | Repository, scan-on-push, keep-last-10 lifecycle policy |
 | `ecs.tf` | Cluster, task definition (256 CPU / 512 MB), service with circuit breaker |
@@ -722,13 +723,17 @@ gh variable set ECS_SECURITY_GROUP_ID      --body "$(terraform output -raw ecs_t
 gh variable set ECS_SUBNET_IDS             --body "$(terraform output -json ecs_task_subnet_ids | jq -r 'join(",")')"
 ```
 
-If the AWS account already has a GitHub OIDC provider from another project,
-import it instead of creating a second one:
+If the AWS account already has a GitHub OIDC provider from another project, set
+this in `terraform/terraform.tfvars`:
 
-```bash
-terraform import aws_iam_openid_connect_provider.github \
-  arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
+```hcl
+create_github_oidc_provider = false
 ```
+
+Terraform then looks up the existing provider with a data source instead of
+creating one. The provider stays out of this project's state, so
+`terraform destroy` never deletes a provider that another project depends on.
+Do **not** `terraform import` it, because that would put it in this state.
 
 ## 16. GitHub Actions
 
@@ -930,8 +935,9 @@ and then:
    so no other bucket can be touched.
 3. **Runs `terraform destroy`**, retrying once if AWS eventual consistency trips
    it (typically a Fargate network interface that is still detaching).
-4. **Deregisters the task definition revisions** that each deploy registered
-   outside Terraform.
+4. **Deregisters, then permanently deletes, the task definition revisions**
+   that each deploy registered outside Terraform. Deregistering alone leaves
+   them listed as INACTIVE.
 5. **Verifies** that the Terraform state is empty, then runs
    `scripts/check-leftovers.sh`. That script is a **read-only** scan of the
    account for anything tagged `Project=MiniJobBoardApplicationTracker` or
@@ -964,10 +970,10 @@ no `aws s3 rb` on anything the script did not create.
 - After the destroy, a push to `main` makes the Deploy workflow fail at the OIDC
   step, because its IAM role is gone. That is harmless (the workflow cannot
   create anything), but you can silence it with `gh workflow disable Deploy`.
-- If you *imported* an existing GitHub OIDC provider (see
-  `terraform/github_oidc.tf`), run
-  `terraform state rm aws_iam_openid_connect_provider.github` before destroying,
-  so that other projects keep theirs.
+- With `create_github_oidc_provider = false`, the account's GitHub OIDC provider
+  is only referenced, never owned, so the destroy leaves it in place for other
+  projects. With the default `true`, this project created it and the destroy
+  removes it.
 - Left in place on purpose, and free: the account-wide service-linked roles AWS
   creates on first use (`AWSServiceRoleForECS`, `AWSServiceRoleForRDS`,
   `AWSServiceRoleForElasticLoadBalancing`, …).
@@ -1079,9 +1085,15 @@ invalidation did not run:
 <details>
 <summary><b>A refresh on /jobs/12 returns 404</b></summary>
 
-That is the SPA fallback. `cloudfront.tf` maps both 403 and 404 to
-`/index.html` with a `200`. If it regresses, check those `custom_error_response`
-blocks.
+That is the SPA fallback. `cloudfront.tf` attaches a CloudFront Function
+(`spa_rewrite`) to the S3 behaviour only. It rewrites any path without a file
+extension to `/index.html`. If it regresses, check that the function is
+published and associated with `default_cache_behavior`.
+
+Do **not** "fix" this with `custom_error_response`. Error pages apply to the
+whole distribution, so mapping 404 → `index.html` also turns every API 404
+(unknown job, wrong tracking email) into a `200` HTML page. `make verify` catches
+this with its "returns 404" checks.
 </details>
 
 <details>
@@ -1108,6 +1120,41 @@ CloudFront distribution or RDS instance for a few minutes. Wait ten minutes and
 run `make destroy-check` again. If an item is still listed, run `make destroy`
 again, which is safe to repeat. If the Terraform state is already empty, delete
 that one item in the console; the check prints its exact name or ARN.
+</details>
+
+<details>
+<summary><b>Admin login says "Incorrect email address or password"</b></summary>
+
+The login deliberately gives the same answer for an unknown email and a wrong
+password. Check these in order:
+
+1. **Right environment?** Locally, the admin is whatever `ADMIN_EMAIL` in `.env`
+   says (`admin@minijobboard.dev` by default). On AWS, it is the email you
+   passed to the seed task in Step 5. The two databases are separate.
+2. **Was it created?** `aws logs tail /ecs/mini-job-board-dev --since 1d | grep "admin:"`
+   should show `admin: created (<your email>)`.
+3. **Shell quoting.** The `--overrides '…'` JSON is single-quoted, so
+   `"value":"$MY_PASS"` stores the literal text `$MY_PASS`. A `"` or `\` inside
+   the password also changes it.
+
+If you still cannot get in, reset the password. The seed only does this when
+explicitly asked, and it refuses the demo default:
+
+```bash
+# Local (docker compose): put the new password in .env, restart the backend, then
+./scripts/seed.sh --no-demo --reset-admin-password
+
+# AWS: same one-off task as Step 5, with the flag added
+aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILY" --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"backend","command":["python","-m","scripts.seed","--no-demo","--reset-admin-password"],"environment":[{"name":"ADMIN_EMAIL","value":"you@example.com"},{"name":"ADMIN_PASSWORD","value":"NEW-STRONG-PASSWORD"}]}]}'
+
+aws logs tail /ecs/mini-job-board-dev --since 5m | grep "admin:"
+# expect: admin: password reset (you@example.com)
+```
+
+The reset is not reachable over HTTP. Only someone with AWS access to run a
+task in the cluster can use it.
 </details>
 
 <details>
@@ -1221,9 +1268,10 @@ make infra-apply      # type "yes" — billing starts here
 ```
 
 If it fails with `EntityAlreadyExists … oidc-provider`, the account already has
-a GitHub OIDC provider. Import it with the `terraform import` command in the
-comment at the top of `terraform/github_oidc.tf`, then run `make infra-apply`
-again.
+a GitHub OIDC provider. Set `create_github_oidc_provider = false` in
+`terraform/terraform.tfvars` and run `make infra-apply` again. Everything that
+was created before the error is already in the state, so the second apply only
+adds what is left.
 
 ### Step 4 — Deploy the application (~10 minutes)
 
@@ -1256,8 +1304,10 @@ aws ecs run-task --cluster "$CLUSTER" --task-definition "$FAMILY" --launch-type 
 ```
 
 Replace the email and password first. The seed is idempotent: re-running it
-never duplicates data and never resets an existing admin's password. After about
-a minute, confirm it worked:
+never duplicates data and never resets an existing admin's password. To reset
+the password on purpose, add `--reset-admin-password` (see *"Admin login says
+Incorrect email address or password"* under Troubleshooting). After about a
+minute, confirm it worked:
 
 ```bash
 aws logs tail /ecs/mini-job-board-dev --since 5m | grep -E "admin|jobs"
@@ -1280,6 +1330,70 @@ Open the Frontend URL:
 
 If the page does not load immediately, give CloudFront a few minutes. To
 redeploy after a code change, just run `make deploy` again.
+
+### Optional — Use your own domain (e.g. from Namecheap)
+
+This serves the app on `example.com` and `www.example.com` as well as the
+`*.cloudfront.net` URL. It adds **no cost**: the ACM certificate and CloudFront
+SNI are free, and DNS stays at your registrar, so there is no Route 53. It takes
+two applies, because ACM only issues the certificate after it sees your DNS
+records.
+
+**1. Request the certificate.** In `terraform/terraform.tfvars`:
+
+```hcl
+custom_domain        = "example.com"   # bare domain: no https://, no www
+attach_custom_domain = false
+```
+
+```bash
+make infra-apply
+terraform -chdir=terraform output custom_domain_validation_records
+```
+
+**2. Prove you own the domain.** In Namecheap, go to *Domain List → Manage →
+Advanced DNS → Add New Record*. Add one **CNAME Record** per entry in that
+output. Use `host` as the Host (Namecheap appends the domain itself) and `value`
+as the Value. Then wait until ACM says `ISSUED`, usually 5–30 minutes:
+
+```bash
+aws acm list-certificates --region us-east-1 \
+  --query "CertificateSummaryList[?DomainName=='example.com'].Status"
+```
+
+Leave those CNAMEs in place. ACM uses them again to renew the certificate every
+year.
+
+**3. Attach the domain to CloudFront.** Set `attach_custom_domain = true`, then:
+
+```bash
+make infra-apply   # CloudFront takes 5–15 minutes to roll this out
+make deploy        # restarts the API with the domain added to CORS_ORIGINS
+```
+
+The `make deploy` is needed because the ECS service ignores task-definition
+changes made by Terraform (see `ecs.tf`). New tasks only pick up the new
+`CORS_ORIGINS` when the deploy script registers the next revision.
+
+**4. Point the domain at CloudFront.** In the same Namecheap screen, first
+delete the parking-page records: the `@` URL Redirect/A record and the `www`
+CNAME to `parkingpage.namecheap.com`. Then add the two records from
+`terraform -chdir=terraform output custom_domain_dns_records`:
+
+| Type | Host | Value |
+|------|------|-------|
+| ALIAS Record | `@` | `dxxxxxxxxxxxx.cloudfront.net` |
+| CNAME Record | `www` | `dxxxxxxxxxxxx.cloudfront.net` |
+
+A plain CNAME is not allowed on the bare domain (`@`), which is why Namecheap's
+`ALIAS` type is used there. Check with `dig +short www.example.com`, then open
+`https://example.com`.
+
+`make deploy`, `make verify` and GitHub Actions keep using the
+`*.cloudfront.net` URL (`application_url`), so they never wait on DNS.
+
+> After `make destroy`, delete the `@` and `www` records at Namecheap. Records
+> pointing at a deleted CloudFront distribution are dangling DNS.
 
 ### Step 7 — Destroy right after the demo
 

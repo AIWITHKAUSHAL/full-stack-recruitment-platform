@@ -18,7 +18,14 @@ locals {
   # CORS origin the API needs in addition to local development.
   cloudfront_url = "https://${aws_cloudfront_distribution.frontend.domain_name}"
 
-  cors_origins = join(",", concat([local.cloudfront_url], var.allowed_frontend_origins))
+  # With a custom domain attached, the page may be loaded from it while a
+  # frontend built by CI still calls the absolute *.cloudfront.net API URL, so
+  # both hostnames of the custom domain are allowed too.
+  cors_origins = join(",", concat(
+    [local.cloudfront_url],
+    [for name in local.cloudfront_aliases : "https://${name}"],
+    var.allowed_frontend_origins,
+  ))
 }
 
 data "aws_caller_identity" "current" {}

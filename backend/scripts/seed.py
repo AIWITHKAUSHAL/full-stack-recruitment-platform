@@ -9,8 +9,10 @@ by giving every seeded row a *stable, deterministic* natural key:
 
 so each seed row is looked up first and only inserted when missing.
 
-    python -m scripts.seed              # jobs + admin + demo applications
-    python -m scripts.seed --no-demo    # jobs + admin only
+    python -m scripts.seed                          # jobs + admin + demo applications
+    python -m scripts.seed --no-demo                # jobs + admin only
+    python -m scripts.seed --reset-admin-password   # also set ADMIN_EMAIL's password
+                                                    # to ADMIN_PASSWORD (recovery)
 """
 
 from __future__ import annotations
@@ -112,18 +114,27 @@ def seed_jobs(db: Session) -> tuple[int, int]:
     return created, updated
 
 
-def seed_admin(db: Session) -> bool:
+def seed_admin(db: Session, reset_password: bool = False) -> str:
     """Creates the bootstrap administrator if it does not exist yet.
 
     An existing admin's password is deliberately left untouched, so re-seeding
-    never resets a password somebody has already changed.
+    never resets a password somebody has already changed — unless the operator
+    explicitly asks for it with ``--reset-admin-password``.
+
+    Returns what happened: "created", "password reset" or "already present".
     """
-    admin, was_created = AuthService(db).ensure_admin(
+    service = AuthService(db)
+    _, was_created = service.ensure_admin(
         email=settings.admin_email,
         password=settings.admin_password,
         full_name="Demo Administrator",
     )
-    return was_created
+    if was_created:
+        return "created"
+    if reset_password:
+        service.reset_password(settings.admin_email, settings.admin_password)
+        return "password reset"
+    return "already present"
 
 
 def _status_plan(total: int) -> list[ApplicationStatus]:
@@ -204,17 +215,28 @@ def seed_demo_applications(db: Session) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seed the Mini Job Board database")
     parser.add_argument("--no-demo", action="store_true", help="skip fake applications")
+    parser.add_argument(
+        "--reset-admin-password",
+        action="store_true",
+        help="set the existing ADMIN_EMAIL account's password to ADMIN_PASSWORD",
+    )
     args = parser.parse_args()
+
+    # Resetting to the published demo password would turn a recovery into a
+    # hole: anyone who has read this README could then log in.
+    if args.reset_admin_password and settings.admin_password == "ChangeMe123!":
+        print("Refusing to reset the admin password to the demo default. Set ADMIN_PASSWORD.")
+        return 1
 
     with SessionLocal() as db:
         created, updated = seed_jobs(db)
-        admin_created = seed_admin(db)
+        admin_outcome = seed_admin(db, reset_password=args.reset_admin_password)
         demo = 0 if args.no_demo else seed_demo_applications(db)
 
     print(f"jobs:         {created} created, {updated} refreshed")
-    print(f"admin:        {'created' if admin_created else 'already present'} ({settings.admin_email})")
+    print(f"admin:        {admin_outcome} ({settings.admin_email})")
     print(f"applications: {demo} created")
-    if admin_created and settings.admin_password == "ChangeMe123!":
+    if admin_outcome == "created" and settings.admin_password == "ChangeMe123!":
         print("\nWARNING: the bootstrap admin is using the default demo password. "
               "Set ADMIN_PASSWORD before exposing this environment.")
     return 0

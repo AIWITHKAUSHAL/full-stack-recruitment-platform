@@ -4,8 +4,22 @@
 !.env.example
 *.pem
 *.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
 credentials
 aws-credentials*
+.aws/
+.npmrc
+.pypirc
+.netrc
+.docker/config.json
+secrets.local.*
+AWS-RESOURCES-CHECKLIST.local.md
 
 # ---------- python ----------
 __pycache__/
@@ -39,10 +53,14 @@ pnpm-debug.log*
 *.tfvars
 !*.tfvars.example
 crash.log
+crash.*.log
 override.tf
 override.tf.json
 tfplan
 tfplan.*
+*.tfplan
+.terraformrc
+terraform.rc
 
 # ---------- local storage fallback ----------
 backend/.local-storage/

@@ -12,6 +12,16 @@ environment = "dev"
 # workflow runs from this exact repository.
 github_repository = "your-github-username/mini-job-board-application-tracker"
 
+# AWS allows one GitHub OIDC provider per account. If apply fails with
+# "EntityAlreadyExists ... token.actions.githubusercontent.com", set this to
+# false: the existing provider is referenced and never destroyed.
+create_github_oidc_provider = true
+
+# Optional custom domain, DNS kept at your registrar (no Route 53). See the
+# README section "Use your own domain". Leave empty for *.cloudfront.net only.
+custom_domain        = ""
+attach_custom_domain = false
+
 # ---------------------------------------------------------------------- cost --
 # The defaults below are already the cheapest sensible values. They are repeated
 # here so the cost levers are visible in one place.
